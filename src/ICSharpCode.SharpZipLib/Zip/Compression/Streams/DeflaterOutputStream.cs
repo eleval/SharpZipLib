@@ -151,7 +151,7 @@ namespace ICSharpCode.SharpZipLib.Zip.Compression.Streams
 
 				EncryptBlock(buffer_, 0, len);
 
-				await baseOutputStream_.WriteAsync(buffer_, 0, len, ct);
+				await baseOutputStream_.WriteAsync(buffer_, 0, len, ct).ConfigureAwait(false);
 			}
 
 			if (!deflater_.IsFinished)
@@ -159,7 +159,7 @@ namespace ICSharpCode.SharpZipLib.Zip.Compression.Streams
 				throw new SharpZipBaseException("Can't deflate all input?");
 			}
 
-			await baseOutputStream_.FlushAsync(ct);
+			await baseOutputStream_.FlushAsync(ct).ConfigureAwait(false);
 
 			if (cryptoTransform_ != null)
 			{
@@ -205,7 +205,12 @@ namespace ICSharpCode.SharpZipLib.Zip.Compression.Streams
 		protected byte[] AESAuthCode;
 
 		/// <inheritdoc cref="StringCodec.ZipCryptoEncoding"/>
-		public Encoding ZipCryptoEncoding { get; set; } = StringCodec.DefaultZipCryptoEncoding;
+		public Encoding ZipCryptoEncoding {
+			get => _stringCodec.ZipCryptoEncoding;
+			set {
+				_stringCodec = _stringCodec.WithZipCryptoEncoding(value);
+			} 
+		}
 
 		/// <summary>
 		/// Encrypt a block of data
@@ -235,11 +240,9 @@ namespace ICSharpCode.SharpZipLib.Zip.Compression.Streams
 		/// are processed.
 		/// </summary>
 		protected void Deflate()
-		{
-			Deflate(false);
-		}
+			=> DeflateSyncOrAsync(false, null).GetAwaiter().GetResult();
 
-		private void Deflate(bool flushing)
+		private async Task DeflateSyncOrAsync(bool flushing, CancellationToken? ct)
 		{
 			while (flushing || !deflater_.IsNeedingInput)
 			{
@@ -252,7 +255,14 @@ namespace ICSharpCode.SharpZipLib.Zip.Compression.Streams
 
 				EncryptBlock(buffer_, 0, deflateCount);
 
-				baseOutputStream_.Write(buffer_, 0, deflateCount);
+				if (ct.HasValue)
+				{
+					await baseOutputStream_.WriteAsync(buffer_, 0, deflateCount, ct.Value).ConfigureAwait(false);
+				}
+				else
+				{
+					baseOutputStream_.Write(buffer_, 0, deflateCount);
+				}
 			}
 
 			if (!deflater_.IsNeedingInput)
@@ -378,8 +388,21 @@ namespace ICSharpCode.SharpZipLib.Zip.Compression.Streams
 		public override void Flush()
 		{
 			deflater_.Flush();
-			Deflate(true);
+			DeflateSyncOrAsync(true, null).GetAwaiter().GetResult();
 			baseOutputStream_.Flush();
+		}
+
+		/// <summary>
+		/// Asynchronously clears all buffers for this stream, causes any buffered data to be written to the underlying device, and monitors cancellation requests.
+		/// </summary>
+		/// <param name="cancellationToken">
+		/// The token to monitor for cancellation requests. The default value is <see cref="CancellationToken.None"/>.
+		/// </param>
+		public override async Task FlushAsync(CancellationToken cancellationToken)
+		{
+			deflater_.Flush();
+			await DeflateSyncOrAsync(true, cancellationToken).ConfigureAwait(false);
+			await baseOutputStream_.FlushAsync(cancellationToken).ConfigureAwait(false);
 		}
 
 		/// <summary>
@@ -412,7 +435,7 @@ namespace ICSharpCode.SharpZipLib.Zip.Compression.Streams
 			}
 		}
 
-#if NETSTANDARD2_1
+#if NETSTANDARD2_1 || NETCOREAPP3_0_OR_GREATER
 		/// <summary>
 		/// Calls <see cref="FinishAsync"/> and closes the underlying
 		/// stream when <see cref="IsStreamOwner"></see> is true.
@@ -425,7 +448,7 @@ namespace ICSharpCode.SharpZipLib.Zip.Compression.Streams
 
 				try
 				{
-					await FinishAsync(CancellationToken.None);
+					await FinishAsync(CancellationToken.None).ConfigureAwait(false);
 					if (cryptoTransform_ != null)
 					{
 						GetAuthCodeIfAES();
@@ -437,7 +460,7 @@ namespace ICSharpCode.SharpZipLib.Zip.Compression.Streams
 				{
 					if (IsStreamOwner)
 					{
-						await baseOutputStream_.DisposeAsync();
+						await baseOutputStream_.DisposeAsync().ConfigureAwait(false);
 					}
 				}
 			}
@@ -486,6 +509,27 @@ namespace ICSharpCode.SharpZipLib.Zip.Compression.Streams
 			Deflate();
 		}
 
+		/// <summary>
+		/// Asynchronously writes a sequence of bytes to the current stream, advances the current position within this stream by the number of bytes written, and monitors cancellation requests.
+		/// </summary>
+		/// <param name="buffer">
+		/// The byte array
+		/// </param>
+		/// <param name="offset">
+		/// The offset into the byte array where to start.
+		/// </param>
+		/// <param name="count">
+		/// The number of bytes to write.
+		/// </param>
+		/// <param name="ct">
+		/// The token to monitor for cancellation requests. The default value is <see cref="CancellationToken.None"/>.
+		/// </param>
+		public override async Task WriteAsync(byte[] buffer, int offset, int count, CancellationToken ct)
+		{
+			deflater_.SetInput(buffer, offset, count);
+			await DeflateSyncOrAsync(false, ct).ConfigureAwait(false);
+		}
+
 		#endregion Stream Overrides
 
 		#region Instance Fields
@@ -507,6 +551,9 @@ namespace ICSharpCode.SharpZipLib.Zip.Compression.Streams
 		protected Stream baseOutputStream_;
 
 		private bool isClosed_;
+
+		/// <inheritdoc cref="StringCodec"/>
+		protected StringCodec _stringCodec = ZipStrings.GetStringCodec();
 
 		#endregion Instance Fields
 	}

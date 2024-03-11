@@ -7,6 +7,7 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
 
@@ -313,7 +314,7 @@ namespace ICSharpCode.SharpZipLib.Zip
 	/// }
 	/// </code>
 	/// </example>
-	public class ZipFile : IEnumerable, IDisposable
+	public class ZipFile : IEnumerable<ZipEntry>, IDisposable
 	{
 		#region KeyHandling
 
@@ -390,6 +391,23 @@ namespace ICSharpCode.SharpZipLib.Zip
 		/// Opens a Zip file with the given name for reading.
 		/// </summary>
 		/// <param name="name">The name of the file to open.</param>
+		/// <exception cref="ArgumentNullException">The argument supplied is null.</exception>
+		/// <exception cref="IOException">
+		/// An i/o error occurs
+		/// </exception>
+		/// <exception cref="ZipException">
+		/// The file doesn't contain a valid zip archive.
+		/// </exception>
+		public ZipFile(string name) : 
+			this(name, null) 
+		{ 
+
+		}
+
+		/// <summary>
+		/// Opens a Zip file with the given name for reading.
+		/// </summary>
+		/// <param name="name">The name of the file to open.</param>
 		/// <param name="stringCodec"></param>
 		/// <exception cref="ArgumentNullException">The argument supplied is null.</exception>
 		/// <exception cref="IOException">
@@ -398,7 +416,7 @@ namespace ICSharpCode.SharpZipLib.Zip
 		/// <exception cref="ZipException">
 		/// The file doesn't contain a valid zip archive.
 		/// </exception>
-		public ZipFile(string name, StringCodec stringCodec = null)
+		public ZipFile(string name, StringCodec stringCodec)
 		{
 			name_ = name ?? throw new ArgumentNullException(nameof(name));
 
@@ -516,7 +534,31 @@ namespace ICSharpCode.SharpZipLib.Zip
 		/// <exception cref="ArgumentNullException">
 		/// The <see cref="Stream">stream</see> argument is null.
 		/// </exception>
-		public ZipFile(Stream stream, bool leaveOpen)
+		public ZipFile(Stream stream, bool leaveOpen) : 
+			this(stream, leaveOpen, null) 
+		{ 
+		
+		}
+
+		/// <summary>
+		/// Opens a Zip file reading the given <see cref="Stream"/>.
+		/// </summary>
+		/// <param name="stream">The <see cref="Stream"/> to read archive data from.</param>
+		/// <param name="leaveOpen">true to leave the <see cref="Stream">stream</see> open when the ZipFile is disposed, false to dispose of it</param>
+		/// <param name="stringCodec"></param>
+		/// <exception cref="IOException">
+		/// An i/o error occurs
+		/// </exception>
+		/// <exception cref="ZipException">
+		/// The stream doesn't contain a valid zip archive.<br/>
+		/// </exception>
+		/// <exception cref="ArgumentException">
+		/// The <see cref="Stream">stream</see> doesnt support seeking.
+		/// </exception>
+		/// <exception cref="ArgumentNullException">
+		/// The <see cref="Stream">stream</see> argument is null.
+		/// </exception>
+		public ZipFile(Stream stream, bool leaveOpen, StringCodec stringCodec)
 		{
 			if (stream == null)
 			{
@@ -530,6 +572,11 @@ namespace ICSharpCode.SharpZipLib.Zip
 
 			baseStream_ = stream;
 			isStreamOwner = !leaveOpen;
+
+			if (stringCodec != null)
+			{
+				_stringCodec = stringCodec;
+			}
 
 			if (baseStream_.Length > 0)
 			{
@@ -736,14 +783,20 @@ namespace ICSharpCode.SharpZipLib.Zip
 		public Encoding ZipCryptoEncoding
 		{
 			get => _stringCodec.ZipCryptoEncoding;
-			set => _stringCodec.ZipCryptoEncoding = value;
+			set => _stringCodec = _stringCodec.WithZipCryptoEncoding(value);
 		}
 
-		/// <inheritdoc cref="StringCodec"/>
+		/// <inheritdoc cref="Zip.StringCodec"/>
 		public StringCodec StringCodec
 		{
-			get => _stringCodec;
-			set => _stringCodec = value;
+			set {
+				_stringCodec = value;
+				if (!isNewArchive_)
+				{
+					// Since the string codec was changed
+					ReadEntries();
+				}
+			}
 		}
 
 		#endregion Properties
@@ -757,7 +810,31 @@ namespace ICSharpCode.SharpZipLib.Zip
 		/// <exception cref="ObjectDisposedException">
 		/// The Zip file has been closed.
 		/// </exception>
-		public IEnumerator GetEnumerator()
+		IEnumerator IEnumerable.GetEnumerator()
+		{
+			return GetEnumerator();
+		}
+
+		/// <summary>
+		/// Gets an enumerator for the Zip entries in this Zip file.
+		/// </summary>
+		/// <returns>Returns an <see cref="IEnumerator"/> for this archive.</returns>
+		/// <exception cref="ObjectDisposedException">
+		/// The Zip file has been closed.
+		/// </exception>
+		IEnumerator<ZipEntry> IEnumerable<ZipEntry>.GetEnumerator()
+		{
+			return GetEnumerator();
+		}
+
+		/// <summary>
+		/// Gets an enumerator for the Zip entries in this Zip file.
+		/// </summary>
+		/// <returns>Returns an <see cref="IEnumerator"/> for this archive.</returns>
+		/// <exception cref="ObjectDisposedException">
+		/// The Zip file has been closed.
+		/// </exception>
+		public ZipEntryEnumerator GetEnumerator()
 		{
 			if (isDisposed_)
 			{
@@ -901,7 +978,7 @@ namespace ICSharpCode.SharpZipLib.Zip
 
 				case CompressionMethod.Deflated:
 					// No need to worry about ownership and closing as underlying stream close does nothing.
-					result = new InflaterInputStream(result, new Inflater(true));
+					result = new InflaterInputStream(result, InflaterPool.Instance.Rent(true));
 					break;
 
 				case CompressionMethod.BZip2:
@@ -1084,6 +1161,7 @@ namespace ICSharpCode.SharpZipLib.Zip
 		[Flags]
 		private enum HeaderTest
 		{
+			None = 0x0,
 			Extract = 0x01,     // Check that this header represents an entry whose data can be extracted
 			Header = 0x02,     // Check that this header contents are valid
 		}
@@ -1110,13 +1188,12 @@ namespace ICSharpCode.SharpZipLib.Zip
 
 				if (signature != ZipConstants.LocalHeaderSignature)
 				{
-					throw new ZipException(string.Format("Wrong local header signature at 0x{0:x}, expected 0x{1:x8}, actual 0x{2:x8}",
-						entryAbsOffset, ZipConstants.LocalHeaderSignature, signature));
+					throw new ZipException($"Wrong local header signature at 0x{entryAbsOffset:x}, expected 0x{ZipConstants.LocalHeaderSignature:x8}, actual 0x{signature:x8}");
 				}
 
 				var extractVersion = (short)(ReadLEUshort() & 0x00ff);
 				var localFlags = (GeneralBitFlags)ReadLEUshort();
-				var compressionMethod = (short)ReadLEUshort();
+				var compressionMethod = (CompressionMethod)ReadLEUshort();
 				var fileTime = (short)ReadLEUshort();
 				var fileDate = (short)ReadLEUshort();
 				uint crcValue = ReadLEUint();
@@ -1134,7 +1211,7 @@ namespace ICSharpCode.SharpZipLib.Zip
 				var localExtraData = new ZipExtraData(extraData);
 
 				// Extra data / zip64 checks
-				if (localExtraData.Find(1))
+				if (localExtraData.Find(headerID: 1))
 				{
 					// 2010-03-04 Forum 10512: removed checks for version >= ZipConstants.VersionZip64
 					// and size or compressedSize = MaxValue, due to rogue creators.
@@ -1145,12 +1222,12 @@ namespace ICSharpCode.SharpZipLib.Zip
 					if (localFlags.HasAny(GeneralBitFlags.Descriptor))
 					{
 						// These may be valid if patched later
-						if ((size > 0) && (size != entry.Size))
+						if ((size != 0) && (size != entry.Size))
 						{
 							throw new ZipException("Size invalid for descriptor");
 						}
 
-						if ((compressedSize > 0) && (compressedSize != entry.CompressedSize))
+						if ((compressedSize != 0) && (compressedSize != entry.CompressedSize))
 						{
 							throw new ZipException("Compressed size invalid for descriptor");
 						}
@@ -1175,15 +1252,19 @@ namespace ICSharpCode.SharpZipLib.Zip
 							throw new ZipException("Compression method not supported");
 						}
 
-						if ((extractVersion > ZipConstants.VersionMadeBy)
-							|| ((extractVersion > 20) && (extractVersion < ZipConstants.VersionZip64)))
+						if (extractVersion > ZipConstants.VersionMadeBy
+							|| (extractVersion > 20 && extractVersion < ZipConstants.VersionZip64))
 						{
-							throw new ZipException(string.Format("Version required to extract this entry not supported ({0})", extractVersion));
+							throw new ZipException($"Version required to extract this entry not supported ({extractVersion})");
 						}
 
-						if (localFlags.HasAny(GeneralBitFlags.Patched | GeneralBitFlags.StrongEncryption | GeneralBitFlags.EnhancedCompress | GeneralBitFlags.HeaderMasked))
+						const GeneralBitFlags notSupportedFlags = GeneralBitFlags.Patched 
+																| GeneralBitFlags.StrongEncryption 
+																| GeneralBitFlags.EnhancedCompress 
+																| GeneralBitFlags.HeaderMasked;
+						if (localFlags.HasAny(notSupportedFlags))
 						{
-							throw new ZipException("The library does not support the zip version required to extract this entry");
+							throw new ZipException($"The library does not support the zip features required to extract this entry ({localFlags & notSupportedFlags:F})");
 						}
 					}
 				}
@@ -1207,7 +1288,7 @@ namespace ICSharpCode.SharpZipLib.Zip
 						(extractVersion != 63)
 						)
 					{
-						throw new ZipException(string.Format("Version required to extract this entry is invalid ({0})", extractVersion));
+						throw new ZipException($"Version required to extract this entry is invalid ({extractVersion})");
 					}
 
 					var localEncoding = _stringCodec.ZipInputEncoding(localFlags);
@@ -1221,7 +1302,7 @@ namespace ICSharpCode.SharpZipLib.Zip
 					// Encryption requires extract version >= 20
 					if (localFlags.HasAny(GeneralBitFlags.Encrypted) && extractVersion < 20)
 					{
-						throw new ZipException(string.Format("Version required to extract this entry is too low for encryption ({0})", extractVersion));
+						throw new ZipException($"Version required to extract this entry is too low for encryption ({extractVersion})");
 					}
 
 					// Strong encryption requires encryption flag to be set and extract version >= 50.
@@ -1234,26 +1315,26 @@ namespace ICSharpCode.SharpZipLib.Zip
 
 						if (extractVersion < 50)
 						{
-							throw new ZipException(string.Format("Version required to extract this entry is too low for encryption ({0})", extractVersion));
+							throw new ZipException($"Version required to extract this entry is too low for encryption ({extractVersion})");
 						}
 					}
 
 					// Patched entries require extract version >= 27
 					if (localFlags.HasAny(GeneralBitFlags.Patched) && extractVersion < 27)
 					{
-						throw new ZipException(string.Format("Patched data requires higher version than ({0})", extractVersion));
+						throw new ZipException($"Patched data requires higher version than ({extractVersion})");
 					}
 
 					// Central header flags match local entry flags.
 					if ((int)localFlags != entry.Flags)
 					{
-						throw new ZipException("Central header/local header flags mismatch");
+						throw new ZipException($"Central header/local header flags mismatch ({(GeneralBitFlags)entry.Flags:F} vs {localFlags:F})");
 					}
 
 					// Central header compression method matches local entry
-					if (entry.CompressionMethodForHeader != (CompressionMethod)compressionMethod)
+					if (entry.CompressionMethodForHeader != compressionMethod)
 					{
-						throw new ZipException("Central header/local header compression method mismatch");
+						throw new ZipException($"Central header/local header compression method mismatch ({entry.CompressionMethodForHeader:G} vs {compressionMethod:G})");
 					}
 
 					if (entry.Version != extractVersion)
@@ -1272,7 +1353,7 @@ namespace ICSharpCode.SharpZipLib.Zip
 
 					if (localFlags.HasAny(GeneralBitFlags.HeaderMasked))
 					{
-						if ((fileTime != 0) || (fileDate != 0))
+						if (fileTime != 0 || fileDate != 0)
 						{
 							throw new ZipException("Header masked set but date/time values non-zero");
 						}
@@ -1287,8 +1368,8 @@ namespace ICSharpCode.SharpZipLib.Zip
 					}
 
 					// Crc valid for empty entry.
-					// This will also apply to streamed entries where size isnt known and the header cant be patched
-					if ((size == 0) && (compressedSize == 0))
+					// This will also apply to streamed entries where size isn't known and the header cant be patched
+					if (size == 0 && compressedSize == 0)
 					{
 						if (crcValue != 0)
 						{
@@ -1351,20 +1432,15 @@ namespace ICSharpCode.SharpZipLib.Zip
 				if (!localFlags.HasAny(GeneralBitFlags.Descriptor) ||
 					((size > 0 || compressedSize > 0) && entry.Size > 0))
 				{
-					if ((size != 0)
-						&& (size != entry.Size))
+					if (size != 0 && size != entry.Size)
 					{
-						throw new ZipException(
-							string.Format("Size mismatch between central header({0}) and local header({1})",
-								entry.Size, size));
+						throw new ZipException($"Size mismatch between central header ({entry.Size}) and local header ({size})");
 					}
 
-					if ((compressedSize != 0)
+					if (compressedSize != 0
 						&& (compressedSize != entry.CompressedSize && compressedSize != 0xFFFFFFFF && compressedSize != -1))
 					{
-						throw new ZipException(
-							string.Format("Compressed size mismatch between central header({0}) and local header({1})",
-							entry.CompressedSize, compressedSize));
+						throw new ZipException($"Compressed size mismatch between central header({entry.CompressedSize}) and local header({compressedSize})");
 					}
 				}
 
@@ -1593,7 +1669,7 @@ namespace ICSharpCode.SharpZipLib.Zip
 				{
 					RunUpdates();
 				}
-				else if (commentEdited_)
+				else if (commentEdited_ && !isNewArchive_)
 				{
 					UpdateCommentOnly();
 				}
@@ -3520,20 +3596,16 @@ namespace ICSharpCode.SharpZipLib.Zip
 			}
 
 			bool isZip64 = false;
-			bool requireZip64 = false;
-
+			
 			// Check if zip64 header information is required.
-			if ((thisDiskNumber == 0xffff) ||
-				(startCentralDirDisk == 0xffff) ||
-				(entriesForThisDisk == 0xffff) ||
-				(entriesForWholeCentralDir == 0xffff) ||
-				(centralDirSize == 0xffffffff) ||
-				(offsetOfCentralDir == 0xffffffff))
-			{
-				requireZip64 = true;
-			}
+			bool requireZip64 = thisDiskNumber == 0xffff ||
+			                    startCentralDirDisk == 0xffff ||
+			                    entriesForThisDisk == 0xffff ||
+			                    entriesForWholeCentralDir == 0xffff ||
+			                    centralDirSize == 0xffffffff ||
+			                    offsetOfCentralDir == 0xffffffff;
 
-			// #357 - always check for the existance of the Zip64 central directory.
+			// #357 - always check for the existence of the Zip64 central directory.
 			// #403 - Take account of the fixed size of the locator when searching.
 			//    Subtract from locatedEndOfCentralDir so that the endLocation is the location of EndOfCentralDirectorySignature,
 			//    rather than the data following the signature.
@@ -3567,7 +3639,7 @@ namespace ICSharpCode.SharpZipLib.Zip
 
 				if (sig64 != ZipConstants.Zip64CentralFileHeaderSignature)
 				{
-					throw new ZipException(string.Format("Invalid Zip64 Central directory signature at {0:X}", offset64));
+					throw new ZipException($"Invalid Zip64 Central directory signature at {offset64:X}");
 				}
 
 				// NOTE: Record size = SizeOfFixedFields + SizeOfVariableData - 12.
@@ -3622,8 +3694,11 @@ namespace ICSharpCode.SharpZipLib.Zip
 				int extraLen = ReadLEUshort();
 				int commentLen = ReadLEUshort();
 
-				int diskStartNo = ReadLEUshort();  // Not currently used
-				int internalAttributes = ReadLEUshort();  // Not currently used
+				
+				// ReSharper disable once UnusedVariable, Currently unused but needs to be read to offset the stream
+				int diskStartNo = ReadLEUshort();
+				// ReSharper disable once UnusedVariable, Currently unused but needs to be read to offset the stream
+				int internalAttributes = ReadLEUshort();
 
 				uint externalAttributes = ReadLEUint();
 				long offset = ReadLEUint();
@@ -3647,7 +3722,7 @@ namespace ICSharpCode.SharpZipLib.Zip
 					ExternalFileAttributes = (int)externalAttributes
 				};
 
-				if ((bitFlags & 8) == 0)
+				if (!entry.HasFlag(GeneralBitFlags.Descriptor))
 				{
 					entry.CryptoCheckValue = (byte)(crc >> 24);
 				}
@@ -3690,8 +3765,14 @@ namespace ICSharpCode.SharpZipLib.Zip
 		/// </exception>
 		private long LocateEntry(ZipEntry entry)
 		{
-			return TestLocalHeader(entry, HeaderTest.Extract);
+			return TestLocalHeader(entry, SkipLocalEntryTestsOnLocate ? HeaderTest.None : HeaderTest.Extract);
 		}
+
+		/// <summary>
+		/// Skip the verification of the local header when reading an archive entry. Set this to attempt to read the
+		/// entries even if the headers should indicate that doing so would fail or produce an unexpected output. 
+		/// </summary>
+		public bool SkipLocalEntryTestsOnLocate { get; set; } = false;
 
 		private Stream CreateAndInitDecryptionStream(Stream baseStream, ZipEntry entry)
 		{
@@ -3709,15 +3790,15 @@ namespace ICSharpCode.SharpZipLib.Zip
 					}
 					int saltLen = entry.AESSaltLen;
 					byte[] saltBytes = new byte[saltLen];
-					int saltIn = StreamUtils.ReadRequestedBytes(baseStream, saltBytes, 0, saltLen);
-					if (saltIn != saltLen)
-						throw new ZipException("AES Salt expected " + saltLen + " got " + saltIn);
-					//
+					int saltIn = StreamUtils.ReadRequestedBytes(baseStream, saltBytes, offset: 0, saltLen);
+					
+					if (saltIn != saltLen) throw new ZipException($"AES Salt expected {saltLen} git {saltIn}");
+					
 					byte[] pwdVerifyRead = new byte[2];
 					StreamUtils.ReadFully(baseStream, pwdVerifyRead);
 					int blockSize = entry.AESKeySize / 8;   // bits to bytes
 
-					var decryptor = new ZipAESTransform(rawPassword_, saltBytes, blockSize, false);
+					var decryptor = new ZipAESTransform(rawPassword_, saltBytes, blockSize, writeMode: false);
 					byte[] pwdVerifyCalc = decryptor.PwdVerifier;
 					if (pwdVerifyCalc[0] != pwdVerifyRead[0] || pwdVerifyCalc[1] != pwdVerifyRead[1])
 						throw new ZipException("Invalid password for AES");
@@ -3730,8 +3811,7 @@ namespace ICSharpCode.SharpZipLib.Zip
 			}
 			else
 			{
-				if ((entry.Version < ZipConstants.VersionStrongEncryption)
-					|| (entry.Flags & (int)GeneralBitFlags.StrongEncryption) == 0)
+				if (entry.Version < ZipConstants.VersionStrongEncryption || !entry.HasFlag(GeneralBitFlags.StrongEncryption))
 				{
 					var classicManaged = new PkzipClassicManaged();
 
@@ -3756,31 +3836,29 @@ namespace ICSharpCode.SharpZipLib.Zip
 
 		private Stream CreateAndInitEncryptionStream(Stream baseStream, ZipEntry entry)
 		{
-			CryptoStream result = null;
-			if ((entry.Version < ZipConstants.VersionStrongEncryption)
-				|| (entry.Flags & (int)GeneralBitFlags.StrongEncryption) == 0)
+			if (entry.Version >= ZipConstants.VersionStrongEncryption &&
+			    entry.HasFlag(GeneralBitFlags.StrongEncryption)) return null;
+
+			var classicManaged = new PkzipClassicManaged();
+
+			OnKeysRequired(entry.Name);
+			if (HaveKeys == false)
 			{
-				var classicManaged = new PkzipClassicManaged();
+				throw new ZipException("No password available for encrypted stream");
+			}
 
-				OnKeysRequired(entry.Name);
-				if (HaveKeys == false)
-				{
-					throw new ZipException("No password available for encrypted stream");
-				}
+			// Closing a CryptoStream will close the base stream as well so wrap it in an UncompressedStream
+			// which doesnt do this.
+			var result = new CryptoStream(new UncompressedStream(baseStream),
+				classicManaged.CreateEncryptor(key, null), CryptoStreamMode.Write);
 
-				// Closing a CryptoStream will close the base stream as well so wrap it in an UncompressedStream
-				// which doesnt do this.
-				result = new CryptoStream(new UncompressedStream(baseStream),
-					classicManaged.CreateEncryptor(key, null), CryptoStreamMode.Write);
-
-				if ((entry.Crc < 0) || (entry.Flags & 8) != 0)
-				{
-					WriteEncryptionHeader(result, entry.DosTime << 16);
-				}
-				else
-				{
-					WriteEncryptionHeader(result, entry.Crc);
-				}
+			if (entry.Crc < 0 || entry.HasFlag(GeneralBitFlags.Descriptor))
+			{
+				WriteEncryptionHeader(result, entry.DosTime << 16);
+			}
+			else
+			{
+				WriteEncryptionHeader(result, entry.Crc);
 			}
 			return result;
 		}
@@ -3798,12 +3876,12 @@ namespace ICSharpCode.SharpZipLib.Zip
 		private static void WriteEncryptionHeader(Stream stream, long crcValue)
 		{
 			byte[] cryptBuffer = new byte[ZipConstants.CryptoHeaderSize];
-			using (var rng = new RNGCryptoServiceProvider())
+			using (var rng = RandomNumberGenerator.Create())
 			{
 				rng.GetBytes(cryptBuffer);
 			}
 			cryptBuffer[11] = (byte)(crcValue >> 24);
-			stream.Write(cryptBuffer, 0, cryptBuffer.Length);
+			stream.Write(cryptBuffer, offset: 0, cryptBuffer.Length);
 		}
 
 		#endregion Internal routines
@@ -3965,20 +4043,26 @@ namespace ICSharpCode.SharpZipLib.Zip
 		/// <summary>
 		/// An <see cref="IEnumerator">enumerator</see> for <see cref="ZipEntry">Zip entries</see>
 		/// </summary>
-		private class ZipEntryEnumerator : IEnumerator
+		public struct ZipEntryEnumerator : IEnumerator<ZipEntry>
 		{
 			#region Constructors
 
+			/// <summary>
+			/// Constructs a new instance of <see cref="ZipEntryEnumerator"/>.
+			/// </summary>
+			/// <param name="entries">Entries to iterate.</param>
 			public ZipEntryEnumerator(ZipEntry[] entries)
 			{
 				array = entries;
+				index = -1;
 			}
 
 			#endregion Constructors
 
 			#region IEnumerator Members
 
-			public object Current
+			/// <inheritdoc />
+			public ZipEntry Current
 			{
 				get
 				{
@@ -3986,14 +4070,24 @@ namespace ICSharpCode.SharpZipLib.Zip
 				}
 			}
 
+			/// <inheritdoc />
+			object IEnumerator.Current => Current;
+
+			/// <inheritdoc />
 			public void Reset()
 			{
 				index = -1;
 			}
 
+			/// <inheritdoc />
 			public bool MoveNext()
 			{
 				return (++index < array.Length);
+			}
+
+			/// <inheritdoc />
+			public void Dispose()
+			{
 			}
 
 			#endregion IEnumerator Members
@@ -4001,7 +4095,7 @@ namespace ICSharpCode.SharpZipLib.Zip
 			#region Instance Fields
 
 			private ZipEntry[] array;
-			private int index = -1;
+			private int index;
 
 			#endregion Instance Fields
 		}

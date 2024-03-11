@@ -5,6 +5,8 @@ using NUnit.Framework;
 using System;
 using System.IO;
 using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
 using NUnit.Framework.Internal;
 
 namespace ICSharpCode.SharpZipLib.Tests.Tar
@@ -110,12 +112,12 @@ namespace ICSharpCode.SharpZipLib.Tests.Tar
 					var offset = blockNumber % TarBuffer.BlockSize;
 					Assert.AreEqual(0, tarData[byteIndex],
 						"Trailing block data should be null iteration {0} block {1} offset {2}  index {3}",
-							factor, blockNumber, offset, byteIndex);
+						factor, blockNumber, offset, byteIndex);
 					byteIndex += 1;
 				}
 			}
 		}
-
+		
 		/// <summary>
 		/// Check that the tar trailer only contains nulls.
 		/// </summary>
@@ -138,10 +140,7 @@ namespace ICSharpCode.SharpZipLib.Tests.Tar
 					}
 					tarOut.PutNextEntry(entry);
 
-					byte[] buffer = new byte[TarBuffer.BlockSize];
-
-					var r = new Random();
-					r.NextBytes(buffer);
+					byte[] buffer = Utils.GetDummyBytes(TarBuffer.BlockSize);
 
 					if (iteration > 0)
 					{
@@ -831,7 +830,7 @@ namespace ICSharpCode.SharpZipLib.Tests.Tar
 			reparseHeader.ParseBuffer(headerbytes, enc);
 			Assert.AreEqual(name, reparseHeader.Name);
 			// top 100 bytes are name field in tar header
-			for (int i = 0;i < encodedName.Length;i++)
+			for (int i = 0; i < encodedName.Length; i++)
 			{
 				Assert.AreEqual(encodedName[i], headerbytes[i]);
 			}
@@ -843,32 +842,75 @@ namespace ICSharpCode.SharpZipLib.Tests.Tar
 		[TestCase(100, "shift-jis")]
 		[TestCase(128, "shift-jis")]
 		[Category("Tar")]
-		public void StreamWithJapaneseName(int length, string encodingName)
+		public async Task StreamWithJapaneseNameAsync(int length, string encodingName)
 		{
 			// U+3042 is Japanese Hiragana
 			// https://unicode.org/charts/PDF/U3040.pdf
 			var entryName = new string((char)0x3042, length);
 			var data = new byte[32];
 			var encoding = Encoding.GetEncoding(encodingName);
-			using(var memoryStream = new MemoryStream())
+			using (var memoryStream = new MemoryStream())
 			{
-				using(var tarOutput = new TarOutputStream(memoryStream, encoding))
+				using (var tarOutput = new TarOutputStream(memoryStream, encoding))
 				{
 					var entry = TarEntry.CreateTarEntry(entryName);
 					entry.Size = 32;
 					tarOutput.PutNextEntry(entry);
 					tarOutput.Write(data, 0, data.Length);
 				}
+
 				using(var memInput = new MemoryStream(memoryStream.ToArray()))
 				using(var inputStream = new TarInputStream(memInput, encoding))
 				{
 					var buf = new byte[64];
-					var entry = inputStream.GetNextEntry();
+					var entry = await inputStream.GetNextEntryAsync(CancellationToken.None);
 					Assert.AreEqual(entryName, entry.Name);
-					var bytesread = inputStream.Read(buf, 0, buf.Length);
+					var bytesread = await inputStream.ReadAsync(buf, 0, buf.Length, CancellationToken.None);
 					Assert.AreEqual(data.Length, bytesread);
 				}
 				File.WriteAllBytes(Path.Combine(Path.GetTempPath(), $"jpnametest_{length}_{encodingName}.tar"), memoryStream.ToArray());
+			}
+		}
+		/// <summary>
+		/// This test could be considered integration test. it creates a tar archive with the root directory specified
+		/// Then extracts it and compares the two folders. This used to fail on unix due to issues with root folder handling
+		/// in the tar archive.
+		/// </summary>
+		[Test]
+		[Category("Tar")]
+		public void RootPathIsRespected()
+		{
+			using (var extractDirectory = new TempDir())
+			using (var tarFileName = new TempFile())
+			using (var tempDirectory = new TempDir())
+			{
+				tempDirectory.CreateDummyFile();
+
+				using (var tarFile = File.Open(tarFileName.FullName, FileMode.Create))
+				{
+					using (var tarOutputStream = TarArchive.CreateOutputTarArchive(tarFile))
+					{
+						tarOutputStream.RootPath = tempDirectory.FullName;
+						var entry = TarEntry.CreateEntryFromFile(tempDirectory.FullName);
+						tarOutputStream.WriteEntry(entry, true);
+					}
+				}
+
+				using (var file = File.OpenRead(tarFileName.FullName))
+				{
+					using (var archive = TarArchive.CreateInputTarArchive(file, Encoding.UTF8))
+					{
+						archive.ExtractContents(extractDirectory.FullName);
+					}
+				}
+
+				var expectationDirectory = new DirectoryInfo(tempDirectory.FullName);
+				foreach (var checkFile in expectationDirectory.GetFiles("", SearchOption.AllDirectories))
+				{
+					var relativePath = checkFile.FullName.Substring(expectationDirectory.FullName.Length + 1);
+					FileAssert.Exists(Path.Combine(extractDirectory.FullName, relativePath));
+					FileAssert.AreEqual(checkFile.FullName, Path.Combine(extractDirectory.FullName, relativePath));
+				}
 			}
 		}
 	}

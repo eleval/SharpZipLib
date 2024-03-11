@@ -1,8 +1,10 @@
 using NUnit.Framework;
 using System;
+using System.Diagnostics;
 using System.IO;
-using System.Linq;
 using System.Text;
+using ICSharpCode.SharpZipLib.Tests.Zip;
+using System.Linq;
 using System.Threading.Tasks;
 
 namespace ICSharpCode.SharpZipLib.Tests.TestSupport
@@ -12,7 +14,10 @@ namespace ICSharpCode.SharpZipLib.Tests.TestSupport
 	/// </summary>
 	public static class Utils
 	{
+		public static int DummyContentLength = 16;
+
 		internal const int DefaultSeed = 5;
+		private static Random random = new Random(DefaultSeed);
 		
 		/// <summary>
 		/// Returns the system root for the current platform (usually c:\ for windows and / for others)
@@ -116,6 +121,39 @@ namespace ICSharpCode.SharpZipLib.Tests.TestSupport
 		/// </summary>
 		/// <returns></returns>
 		public static TempFile GetTempFile() => new TempFile();
+
+		public static void PatchFirstEntrySize(Stream stream, int newSize)
+		{
+			using(stream)
+			{
+				var sizeBytes = BitConverter.GetBytes(newSize);
+
+				stream.Seek(18, SeekOrigin.Begin);
+				stream.Write(sizeBytes, 0, 4);
+				stream.Write(sizeBytes, 0, 4);
+			}
+		}
+
+		public static void FillArray(byte[] buffer, byte value)
+		{
+#if NET6_0_OR_GREATER
+			Array.Fill(buffer, value);
+#else
+			for(var i = 0; i < buffer.Length; i++) buffer[i] = value;
+#endif
+		}
+	}
+	
+	public class TestTraceListener : TraceListener
+	{
+		private readonly TextWriter _writer;
+		public TestTraceListener(TextWriter writer)
+		{
+			_writer = writer;
+		}
+
+		public override void WriteLine(string message) => _writer.WriteLine(message);
+		public override void Write(string message) => _writer.Write(message);
 	}
 	
 	public class TempFile : FileSystemInfo, IDisposable
@@ -138,6 +176,8 @@ namespace ICSharpCode.SharpZipLib.Tests.TestSupport
 			_fileInfo.Delete();
 	    }
 
+		public FileStream Open(FileMode mode, FileAccess access) => _fileInfo.Open(mode, access);
+		public FileStream Open(FileMode mode) => _fileInfo.Open(mode);
 		public FileStream Create() => _fileInfo.Create();
 
 	    public static TempFile WithDummyData(int size, string dirPath = null, string filename = null, int seed = Utils.DefaultSeed)
@@ -154,7 +194,7 @@ namespace ICSharpCode.SharpZipLib.Tests.TestSupport
 		    _fileInfo = new FileInfo(Path.Combine(dirPath, filename));
 	    }
 
-    	#region IDisposable Support
+#region IDisposable Support
 
     	private bool _disposed; // To detect redundant calls
 
@@ -182,10 +222,11 @@ namespace ICSharpCode.SharpZipLib.Tests.TestSupport
     		GC.SuppressFinalize(this);
     	}
 
-    	#endregion IDisposable Support
-
-        
+#endregion IDisposable Support
 	}
+  
+  
+  
     public class TempDir : FileSystemInfo, IDisposable
     {
 	    public override string Name => Path.GetFileName(FullName);
@@ -213,7 +254,7 @@ namespace ICSharpCode.SharpZipLib.Tests.TestSupport
 
         public TempFile GetFile(string fileName) => new TempFile(FullPath, fileName);
         
-    	#region IDisposable Support
+#region IDisposable Support
 
     	private bool _disposed; // To detect redundant calls
 
@@ -240,6 +281,6 @@ namespace ICSharpCode.SharpZipLib.Tests.TestSupport
     		GC.SuppressFinalize(this);
     	}
 
-        #endregion IDisposable Support
+#endregion IDisposable Support
     }
 }
