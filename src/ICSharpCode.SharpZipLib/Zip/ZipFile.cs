@@ -1772,6 +1772,24 @@ namespace ICSharpCode.SharpZipLib.Zip
 			AddUpdate(new ZipUpdate(fileName, EntryFactory.MakeFileEntry(fileName, entryName, true)));
 		}
 
+		public void Add(string fileName, string entryName, CompressionMethod compressionMethod)
+		{
+			if (fileName == null)
+			{
+				throw new ArgumentNullException(nameof(fileName));
+			}
+
+			if (entryName == null)
+			{
+				throw new ArgumentNullException(nameof(entryName));
+			}
+
+			CheckUpdating();
+			ZipEntry entry = EntryFactory.MakeFileEntry(fileName, entryName, true);
+			entry.CompressionMethod = compressionMethod;
+			AddUpdate(new ZipUpdate(fileName, entry));
+		}
+
 		/// <summary>
 		/// Add a file entry with data.
 		/// </summary>
